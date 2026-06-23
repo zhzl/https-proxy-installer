@@ -9,7 +9,7 @@ SQUID_CONF="/etc/squid/squid.conf"
 PASSWD_FILE="/etc/squid/passwd"
 CREDENTIAL_FILE="/etc/squid/https-proxy.credential"
 STUNNEL_CONF="/etc/stunnel/https-proxy.conf"
-CERTBOT_HOOK="/etc/letsencrypt/renewal-hooks/deploy/reload-stunnel.sh"
+ACME_HOME="/root/.acme.sh"
 
 DOMAIN=""
 PUBLIC_PORT="3128"
@@ -195,7 +195,7 @@ print_config_preview() {
   printf 'Squid 内部：127.0.0.1:%s\n' "$INTERNAL_PORT"
   printf '代理用户：%s\n' "$PROXY_USER"
   printf '代理密码：%s\n' "$PASSWORD_STATUS"
-  printf "证书方式：Let's Encrypt，无邮箱注册\n"
+  printf "证书方式：acme.sh + DNS-01 手动 TXT 验证（无需 80 端口、无需 AccessKey）\n"
   printf '访问控制：Squid Basic Auth，不限制来源 IP\n'
 }
 
@@ -231,23 +231,23 @@ detect_os() {
 }
 
 install_packages() {
-  log "安装依赖包：Squid、htpasswd、certbot、stunnel、openssl"
+  log "安装依赖包：Squid、htpasswd、stunnel、openssl、curl、socat"
   case "$OS_FAMILY" in
     debian)
       export DEBIAN_FRONTEND=noninteractive
       apt-get update
-      apt-get install -y squid apache2-utils certbot stunnel4 openssl
+      apt-get install -y squid apache2-utils stunnel4 openssl curl socat
       ;;
     rhel)
       if command -v dnf >/dev/null 2>&1; then
-        dnf install -y squid httpd-tools certbot stunnel openssl
+        dnf install -y squid httpd-tools stunnel openssl curl socat
       else
-        yum install -y squid httpd-tools certbot stunnel openssl
+        yum install -y squid httpd-tools stunnel openssl curl socat
       fi
       ;;
     alpine)
       apk update
-      apk add --no-cache squid apache2-utils certbot stunnel openssl
+      apk add --no-cache squid apache2-utils stunnel openssl curl socat
       ;;
   esac
 }
@@ -258,7 +258,7 @@ has_stunnel_command() {
 
 check_environment() {
   missing=""
-  for cmd in squid htpasswd certbot openssl; do
+  for cmd in squid htpasswd openssl curl socat; do
     command -v "$cmd" >/dev/null 2>&1 || missing="$missing $cmd"
   done
   if ! has_stunnel_command; then
@@ -436,28 +436,88 @@ obtain_certificate() {
   key_file="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
 
   if [ -r "$cert_file" ] && [ -r "$key_file" ]; then
-    log "检测到已有证书，跳过申请：$cert_file"
+    log "检测到已有证书：$cert_file"
+    prompt_yes_no "是否现在重新签发/续期证书（需要手动添加新的 TXT 记录）" "no"
+    if [ "$YES_NO_RESULT" != "yes" ]; then
+      log "跳过证书申请"
+      return 0
+    fi
+
+    install_acme_sh
+    issue_certificate_with_acme force
     return 0
   fi
 
-  log "申请 Let's Encrypt 证书：$DOMAIN"
-  warn "请确认 $DOMAIN 已解析到本机公网 IP，且 80/tcp 可从公网访问"
-  check_port_80_available
-  certbot certonly --standalone \
-    -d "$DOMAIN" \
-    --agree-tos \
-    --register-unsafely-without-email \
-    --non-interactive
+  install_acme_sh
+  issue_certificate_with_acme
 }
 
-check_port_80_available() {
-  if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq '(^|:|\])80$'; then
-    die "80/tcp 已被占用，certbot standalone 无法完成 HTTP-01 验证；请先停止占用 80 端口的服务，或改用 DNS 验证。"
+install_acme_sh() {
+  if [ -x "$ACME_HOME/acme.sh" ]; then
+    log "检测到 acme.sh：$ACME_HOME/acme.sh"
+    return 0
   fi
 
-  if command -v netstat >/dev/null 2>&1 && netstat -ltn 2>/dev/null | awk '{print $4}' | grep -Eq '(^|:|\])80$'; then
-    die "80/tcp 已被占用，certbot standalone 无法完成 HTTP-01 验证；请先停止占用 80 端口的服务，或改用 DNS 验证。"
+  log "安装 acme.sh（轻量 shell 客户端，适合 128MB 机器）"
+  curl -fsSL https://get.acme.sh | sh -s -- --install-online --home "$ACME_HOME"
+  [ -x "$ACME_HOME/acme.sh" ] || die "acme.sh 安装失败"
+}
+
+issue_certificate_with_acme() {
+  force_mode="${1:-}"
+  reload_cmd="systemctl restart stunnel4 2>/dev/null || systemctl restart stunnel 2>/dev/null || rc-service stunnel restart 2>/dev/null || service stunnel4 restart 2>/dev/null || service stunnel restart 2>/dev/null || true"
+
+  log "使用 acme.sh + DNS 手动 TXT 验证签发证书：$DOMAIN"
+
+  "$ACME_HOME/acme.sh" --set-default-ca --server letsencrypt
+
+  cat <<EOF
+
+========== DNS 手动验证说明 ==========
+接下来 acme.sh 会打印一条 TXT 记录，通常长这样：
+  Domain: '_acme-challenge.$DOMAIN'
+  TXT value: '一长串验证值'
+
+请到阿里云 DNS 控制台添加记录：
+  记录类型：TXT
+  主机记录：填 Domain 去掉你在阿里云管理的主域名后剩下的部分
+  记录值：填 TXT value，不要带外层引号
+  TTL：默认或 600
+
+例子：如果代理域名是 yuproxy.zhouzelong.cn，且阿里云管理的主域名是 zhouzelong.cn，
+则主机记录通常填：_acme-challenge.yuproxy
+EOF
+
+  set +e
+  if [ "$force_mode" = "force" ]; then
+    "$ACME_HOME/acme.sh" --issue --dns -d "$DOMAIN" --server letsencrypt --force --yes-I-know-dns-manual-mode-enough-go-ahead-please
+  else
+    "$ACME_HOME/acme.sh" --issue --dns -d "$DOMAIN" --server letsencrypt --yes-I-know-dns-manual-mode-enough-go-ahead-please
   fi
+  issue_status="$?"
+  set -e
+
+  case "$issue_status" in
+    0)
+      log "证书已签发"
+      ;;
+    3)
+      printf '\n请在阿里云 DNS 添加上面打印的 TXT 记录，并等待 1-5 分钟生效。\n'
+      printf '确认 TXT 已添加后，按回车继续验证并签发证书...'
+      IFS= read -r _unused || _unused=""
+
+      "$ACME_HOME/acme.sh" --renew -d "$DOMAIN" --server letsencrypt --force --yes-I-know-dns-manual-mode-enough-go-ahead-please
+      ;;
+    *)
+      die "acme.sh 申请证书失败，退出码：$issue_status"
+      ;;
+  esac
+
+  mkdir -p "/etc/letsencrypt/live/$DOMAIN"
+  "$ACME_HOME/acme.sh" --install-cert -d "$DOMAIN" \
+    --fullchain-file "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" \
+    --key-file "/etc/letsencrypt/live/$DOMAIN/privkey.pem" \
+    --reloadcmd "$reload_cmd"
 }
 
 enable_stunnel_service_config() {
@@ -503,15 +563,6 @@ EOF
 
   chmod 600 "$STUNNEL_CONF"
   enable_stunnel_service_config
-}
-
-write_renewal_hook() {
-  mkdir -p "$(dirname "$CERTBOT_HOOK")"
-  cat > "$CERTBOT_HOOK" <<'EOF'
-#!/bin/sh
-systemctl reload stunnel4 2>/dev/null || systemctl restart stunnel4 2>/dev/null || systemctl reload stunnel 2>/dev/null || systemctl restart stunnel 2>/dev/null || rc-service stunnel restart 2>/dev/null || service stunnel4 restart 2>/dev/null || service stunnel restart 2>/dev/null || true
-EOF
-  chmod +x "$CERTBOT_HOOK"
 }
 
 restart_services() {
@@ -611,7 +662,8 @@ Sub2API 字段：
 安全提醒：
   当前公网端口 $PUBLIC_PORT 允许连接，代理使用仍需用户名和密码。
   建议在云安全组中进一步限制来源，或至少使用强随机密码。
-  申请和续期 Let's Encrypt 证书通常需要 80/tcp 可从公网访问。
+  证书使用 acme.sh + DNS 手动 TXT 验证，不需要开放 80/tcp，也不需要阿里云 AccessKey。
+  手动 DNS 模式不能自动续期；证书接近过期时，重新执行本脚本并按提示更新 TXT 记录。
 EOF
 
   if password_has_url_reserved_chars; then
@@ -636,7 +688,6 @@ main() {
   write_squid_config
   parse_squid_config
   write_stunnel_config
-  write_renewal_hook
   restart_services
   configure_firewall
   write_state
