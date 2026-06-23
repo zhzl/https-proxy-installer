@@ -121,11 +121,20 @@ validate_port() {
   fi
 }
 
+normalize_domain_input() {
+  DOMAIN="$(printf '%s' "$DOMAIN" | tr 'A-Z' 'a-z' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+}
+
 validate_config() {
+  normalize_domain_input
   [ -n "$DOMAIN" ] || die "代理域名不能为空"
 
+  if ! LC_ALL=C printf '%s\n' "$DOMAIN" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z][A-Za-z.-]*$'; then
+    die "代理域名包含非法字符或格式不完整：$DOMAIN"
+  fi
+
   case "$DOMAIN" in
-    *[!A-Za-z0-9_.-]*|.*|*.) die "代理域名包含非法字符或格式不完整：$DOMAIN" ;;
+    *..*|*.-*|*-.*) die "代理域名包含非法的点或短横线位置：$DOMAIN" ;;
   esac
 
   validate_port "公网端口" "$PUBLIC_PORT"
