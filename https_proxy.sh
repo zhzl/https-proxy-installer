@@ -122,20 +122,67 @@ validate_port() {
 }
 
 normalize_domain_input() {
-  DOMAIN="$(printf '%s' "$DOMAIN" | tr 'A-Z' 'a-z' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  DOMAIN="$(printf '%s' "$DOMAIN" | tr 'A-Z' 'a-z' | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/\.$//')"
+}
+
+validate_domain_label() {
+  label="$1"
+  [ -n "$label" ] || return 1
+  [ "${#label}" -le 63 ] || return 1
+
+  case "$label" in
+    -*|*-|*[!a-z0-9-]*) return 1 ;;
+  esac
+
+  return 0
+}
+
+validate_domain_name() {
+  [ -n "$DOMAIN" ] || return 1
+  [ "${#DOMAIN}" -le 253 ] || return 1
+
+  case "$DOMAIN" in
+    *.*) ;;
+    *) return 1 ;;
+  esac
+
+  case "$DOMAIN" in
+    *[!a-z0-9.-]*|.*|*.|*..*) return 1 ;;
+  esac
+
+  tld="${DOMAIN##*.}"
+  case "$tld" in
+    *[a-z]*) ;;
+    *) return 1 ;;
+  esac
+
+  rest="$DOMAIN"
+  while :; do
+    case "$rest" in
+      *.*)
+        label="${rest%%.*}"
+        rest="${rest#*.}"
+        ;;
+      *)
+        label="$rest"
+        rest=""
+        ;;
+    esac
+
+    validate_domain_label "$label" || return 1
+    [ -z "$rest" ] && break
+  done
+
+  return 0
 }
 
 validate_config() {
   normalize_domain_input
   [ -n "$DOMAIN" ] || die "代理域名不能为空"
 
-  if ! LC_ALL=C printf '%s\n' "$DOMAIN" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z][A-Za-z.-]*$'; then
+  if ! validate_domain_name; then
     die "代理域名包含非法字符或格式不完整：$DOMAIN"
   fi
-
-  case "$DOMAIN" in
-    *..*|*.-*|*-.*) die "代理域名包含非法的点或短横线位置：$DOMAIN" ;;
-  esac
 
   validate_port "公网端口" "$PUBLIC_PORT"
   validate_port "内部 Squid 端口" "$INTERNAL_PORT"
@@ -459,7 +506,7 @@ install_acme_sh() {
   fi
 
   log "安装 acme.sh（轻量 shell 客户端，适合 128MB 机器）"
-  curl -fsSL https://get.acme.sh | sh -s -- --install-online --home "$ACME_HOME"
+  curl -fsSL https://get.acme.sh | sh -s -- --home "$ACME_HOME"
   [ -x "$ACME_HOME/acme.sh" ] || die "acme.sh 安装失败"
 }
 
