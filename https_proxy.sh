@@ -506,7 +506,10 @@ install_acme_sh() {
   fi
 
   log "安装 acme.sh（轻量 shell 客户端，适合 128MB 机器）"
-  curl -fsSL https://get.acme.sh | sh -s -- --home "$ACME_HOME"
+  tmp_acme="/tmp/acme.sh.$$"
+  curl -fsSL https://raw.githubusercontent.com/acmesh-official/acme.sh/master/acme.sh -o "$tmp_acme"
+  sh "$tmp_acme" --install --home "$ACME_HOME" --no-profile
+  rm -f "$tmp_acme"
   [ -x "$ACME_HOME/acme.sh" ] || die "acme.sh 安装失败"
 }
 
