@@ -694,16 +694,6 @@ HTTPS 代理信息：
   Username: $PROXY_USER
   Password: $PROXY_PASS
 
-Sub2API 代理 URL：
-  https://$PROXY_USER:$PROXY_PASS@$DOMAIN:$PUBLIC_PORT
-
-Sub2API 字段：
-  Protocol: https
-  Host:     $DOMAIN
-  Port:     $PUBLIC_PORT
-  Username: $PROXY_USER
-  Password: $PROXY_PASS
-
 测试命令：
   curl --proxy-user '$PROXY_USER:$PROXY_PASS' -x 'https://$DOMAIN:$PUBLIC_PORT' https://ifconfig.me
 
@@ -720,10 +710,6 @@ Sub2API 字段：
   证书使用 acme.sh + DNS 手动 TXT 验证，不需要开放 80/tcp，也不需要阿里云 AccessKey。
   手动 DNS 模式不能自动续期；证书接近过期时，重新执行本脚本并按提示更新 TXT 记录。
 EOF
-
-  if password_has_url_reserved_chars; then
-    warn "代理密码包含 URL 保留字符；Sub2API 若使用 URL 形式，密码可能需要百分号编码。字段形式无需编码。"
-  fi
 }
 
 main() {
